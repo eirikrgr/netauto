@@ -2,10 +2,10 @@
 [
     {
         "vendor": "mikrotik",
-        "models": ["CCR2116-12G-4S+", "CCR1036-12G-4S", "RB4011iGS+RM", "crs310"],
+        "model": ["CCR2116-12G-4S+", "CCR1036-12G-4S", "RB4011iGS+RM", "crs310"],
         "protocol": "ssh",
         "parser": "mikrotik",
-        "exec":{
+        "command":{
             "interface": {
                 "default": "/interface vlan print detail without-paging",
                 "bridge":"/interface bridge host print without-paging",
@@ -20,7 +20,8 @@
             }
         },
         "version": {
-            "6":{
+            "allowed": ["6.48", "6.49", "6"],
+            "command":{
                 "interface": {
                     "default": "/interface vlan print detail without-paging",
                     "bridge":"/interface bridge host print without-paging",
@@ -32,7 +33,7 @@
     },
     {
        "vendor": "s600",
-       "models": ["S600"],
+       "model": ["S600"],
        "protocol": "http",
        "parser": "mikrotik",
        "exec":{
