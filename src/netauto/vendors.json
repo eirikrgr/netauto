@@ -1,0 +1,70 @@
+
+[
+    {
+        "vendor": "mikrotik",
+        "models": ["CCR2116-12G-4S+", "CCR1036-12G-4S", "RB4011iGS+RM", "crs310"],
+        "protocol": "ssh",
+        "parser": "mikrotik",
+        "exec":{
+            "interface": {
+                "default": "/interface vlan print detail without-paging",
+                "bridge":"/interface bridge host print without-paging",
+                "vlan": "/interface print detail without-paging",
+                "vrrp": "/interface vrrp print detail without-paging"
+            },
+            "system":{
+                "resource": "/system resource print without-paging"
+            },
+            "ip":{
+                "address": "/ip address print detail without-paging"
+            }
+        },
+        "version": {
+            "6":{
+                "interface": {
+                    "default": "/interface vlan print detail without-paging",
+                    "bridge":"/interface bridge host print without-paging",
+                    "vlan": "/interface print detail without-paging",
+                    "vrrp": "/interface vrrp print detail without-paging"
+                }
+            }
+        }
+    },
+    {
+       "vendor": "s600",
+       "models": ["S600"],
+       "protocol": "http",
+       "parser": "mikrotik",
+       "exec":{
+            "interface":{
+                "default": {
+                    "url": "/dhost.b",
+                    "auth_type": "basic",
+                    "headers": {
+                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                        "Accept-Encoding": "gzip, deflate",
+                        "Accept": "*/*"
+                    }
+                },
+                "vlan": {
+                    "url": "/dhost.b",
+                    "auth_type": "basic",
+                    "headers": {
+                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                        "Accept-Encoding": "gzip, deflate",
+                        "Accept": "*/*"
+                    }
+                }
+            },
+            "system":{
+                "default": {
+                    "url": "/sys.b",
+                    "headers": {
+                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                        "Accept": "*/*"
+                    }
+                }
+            }
+       } 
+    }
+]

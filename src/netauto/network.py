@@ -1,3 +1,6 @@
+# Author: Eirikgr
+# License: MIT
+
 import os
 import httpx
 import base64
@@ -8,7 +11,20 @@ from dotenv import load_dotenv
 
 
 # Load dotenv variables
-load_dotenv()
+# Prefer the deployment-wide .env at /srv/somos-netcheck/.env. If that
+# file doesn't exist, try a local .env in the current working directory.
+# Finally fall back to the default load_dotenv() behaviour.
+SVC_ENV_PATH = '../.env'
+LOCAL_ENV_PATH = os.path.join(os.getcwd(), '.env')
+
+if os.path.exists(SVC_ENV_PATH):
+    load_dotenv(SVC_ENV_PATH)
+elif os.path.exists(LOCAL_ENV_PATH):
+    load_dotenv(LOCAL_ENV_PATH)
+else:
+    # Default behaviour: allows load_dotenv to search in parents or other default places
+    load_dotenv()
+
 
 class SSHCredentials:
     """Manage SSH credentials loaded from a .env file.
@@ -94,7 +110,7 @@ async def ssh_exec_single(
     host: str,
     command: str,
     port: int = 22,
-    timeout: int = 30
+    timeout: int = 10
 ) -> Dict[str, Union[str, dict]]:
     """Execute a single SSH command with automatic credential discovery.
 
@@ -141,7 +157,7 @@ async def ssh_exec_multiple(
     host: str,
     commands: List[str],
     port: int = 22,
-    timeout: int = 30,
+    timeout: int = 10,
     return_type: str = 'dict'
 ) -> Dict[str, Union[Dict, List, dict]]:
     """Execute multiple SSH commands in the same session with automatic credential discovery.
@@ -199,7 +215,7 @@ def wrapper_async_ssh_single_command(
     host: str,
     command: str,
     port: int = 22,
-    timeout: int = 30
+    timeout: int = 10
 ) -> Dict[str, Union[str, dict]]:
     """Synchronous wrapper for ssh_exec_single.
 
@@ -218,7 +234,7 @@ def wrapper_async_ssh_multiple_commands(
     host: str,
     commands: List[str],
     port: int = 22,
-    timeout: int = 30,
+    timeout: int = 10,
     return_type: str = 'dict'
 ) -> Dict[str, Union[Dict, List, dict]]:
     """Synchronous wrapper for ssh_exec_multiple.
@@ -360,7 +376,7 @@ class RouterHTTPClient:
         api_key: Optional[str] = None,
         api_key_header: str = "X-API-Key",
         verify_ssl: bool = False,
-        timeout: int = 30
+        timeout: int = 10
     ) -> Dict[str, Any]:
         """Perform an HTTP request with selected auth and parameters.
 
@@ -404,28 +420,40 @@ class RouterHTTPClient:
         if auth_type == 'digest' and username and password:
             auth = httpx.DigestAuth(username, password)
         
+        # Create an httpx.Timeout object for more granular control
+        httpx_timeout = httpx.Timeout(timeout, connect=min(10.0, timeout))
+
         try:
             async with httpx.AsyncClient(
                 verify=verify_ssl,
-                timeout=httpx.Timeout(timeout, connect=10.0),
+                timeout=httpx_timeout,
                 follow_redirects=True
             ) as client:
-                response = await client.request(
-                    method=method,
-                    url=url,
-                    headers=final_headers,
-                    params=params,
-                    data=data,
-                    json=json,
-                    auth=auth
-                )
-                
+                # Use asyncio.wait_for to ensure the coroutine is cancelled
+                # if the timeout is reached at the asyncio level as well.
+                try:
+                    response = await asyncio.wait_for(
+                        client.request(
+                            method=method,
+                            url=url,
+                            headers=final_headers,
+                            params=params,
+                            data=data,
+                            json=json,
+                            auth=auth
+                        ),
+                        timeout=timeout
+                    )
+                except asyncio.TimeoutError:
+                    # Cancel the underlying request task if still running
+                    raise Exception(f"Timeout connecting to {url} (asyncio.wait_for)")
+
                 # Try to parse as JSON, otherwise return text
                 try:
                     response_data = response.json()
                 except ValueError:
                     response_data = response.text
-                
+
                 return {
                     'status_code': response.status_code,
                     'success': response.is_success,
@@ -433,11 +461,18 @@ class RouterHTTPClient:
                     'headers': dict(response.headers),
                     'url': str(response.url)
                 }
-                
-        except httpx.TimeoutException:
-            raise Exception(f"Timeout connecting to {url}")
+
+        except asyncio.TimeoutError:
+            # This may be raised by httpx internals as well
+            raise Exception(f"Timeout connecting to {url} (asyncio)")
+        except httpx.ReadTimeout:
+            raise Exception(f"Read timeout while connecting to {url}")
+        except httpx.ConnectTimeout:
+            raise Exception(f"Connect timeout while connecting to {url}")
         except httpx.ConnectError:
             raise Exception(f"Could not connect to {url}")
+        except httpx.HTTPError as e:
+            raise Exception(f"HTTP request error: {str(e)}")
         except Exception as e:
             raise Exception(f"HTTP request error: {str(e)}")
 
@@ -447,7 +482,7 @@ async def _try_http_connection(
     auth_type: str = 'basic',
     verify_ssl: bool = False,
     headers: Optional[Dict[str, str]] = None,
-    timeout: int = 30
+    timeout: int = 10
 ) -> Dict[str, Optional[str]]:
     """Try different credentials until finding working ones.
     
@@ -489,23 +524,32 @@ async def _try_http_connection(
     # Test every set of credentials
     for idx, creds in enumerate(credentials_list):
         try:
-            async with httpx.AsyncClient(verify=verify_ssl, timeout=timeout) as client:
+            # Create a per-request httpx timeout
+            httpx_timeout = httpx.Timeout(timeout, connect=min(10.0, timeout))
+            async with httpx.AsyncClient(verify=verify_ssl, timeout=httpx_timeout) as client:
                 auth = None
                 headers = {}
-                
+
                 # Configure authentication according to type
                 if auth_type == 'basic' and 'username' in creds:
                     auth = httpx.BasicAuth(creds['username'], creds['password'])
-                    
+
                 elif auth_type == 'digest' and 'username' in creds:
                     auth = httpx.DigestAuth(creds['username'], creds['password'])
-                    
-                response = await client.request(
-                    method, 
-                    url, 
-                    auth=auth,
-                    headers=headers
-                )
+
+                try:
+                    response = await asyncio.wait_for(
+                        client.request(
+                            method,
+                            url,
+                            auth=auth,
+                            headers=headers
+                        ),
+                        timeout=timeout
+                    )
+                except asyncio.TimeoutError:
+                    last_error = f"Timeout connecting to {url} (asyncio.wait_for)"
+                    continue
 
                 if response.status_code < 400:
                     # Return with all possible keys
@@ -518,6 +562,18 @@ async def _try_http_connection(
                     last_error = f"HTTP {response.status_code}"
                     continue
 
+        except asyncio.TimeoutError:
+            last_error = f"Timeout connecting to {url}"
+            continue
+        except httpx.ReadTimeout:
+            last_error = f"Read timeout while connecting to {url}"
+            continue
+        except httpx.ConnectTimeout:
+            last_error = f"Connect timeout while connecting to {url}"
+            continue
+        except httpx.ConnectError:
+            last_error = f"Could not connect to {url}"
+            continue
         except Exception as e:
             last_error = e
             continue
@@ -537,7 +593,7 @@ async def http_router_request(
     json: Optional[Dict[str, Any]] = None,
     api_key_header: str = "X-API-Key",
     verify_ssl: bool = False,
-    timeout: int = 30
+    timeout: int = 10
 ) -> Dict[str, Any]:
     """Perform HTTP requests to routers with automatic credential discovery.
     
