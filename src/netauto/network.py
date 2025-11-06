@@ -10,23 +10,10 @@ from typing import List, Dict, Union, Optional, Any, Literal
 from dotenv import load_dotenv
 
 
-# Load dotenv variables
-# Prefer the deployment-wide .env at /srv/somos-netcheck/.env. If that
-# file doesn't exist, try a local .env in the current working directory.
-# Finally fall back to the default load_dotenv() behaviour.
-SVC_ENV_PATH = '../.env'
-LOCAL_ENV_PATH = os.path.join(os.getcwd(), '.env')
+TIMEOUT: int = 3 # Default timeout for connections in seconds
+PORT: int = 22
 
-if os.path.exists(SVC_ENV_PATH):
-    load_dotenv(SVC_ENV_PATH)
-elif os.path.exists(LOCAL_ENV_PATH):
-    load_dotenv(LOCAL_ENV_PATH)
-else:
-    # Default behaviour: allows load_dotenv to search in parents or other default places
-    load_dotenv()
-
-
-class SSHCredentials:
+class Credentials:
     """Manage SSH credentials loaded from a .env file.
 
     Attributes:
@@ -37,11 +24,23 @@ class SSHCredentials:
         This class reads up to 3 credential sets from environment variables:
         SSH_USER_1/SSH_PASS_1/SSH_KEY_1 ... SSH_USER_3/SSH_PASS_3/SSH_KEY_3.
     """
-    
+
     def __init__(self):
-        self.credentials = []
-        
-        # Load up to 3 sets of credentials
+
+        SVC_ENV_PATH = '../.env'
+        LOCAL_ENV_PATH = os.path.join(os.getcwd(), '.env')
+        if os.path.exists(SVC_ENV_PATH):
+            load_dotenv(SVC_ENV_PATH)
+        elif os.path.exists(LOCAL_ENV_PATH):
+            load_dotenv(LOCAL_ENV_PATH)
+        else:
+            load_dotenv()
+
+        if not self.credentials:
+            raise ValueError("No SSH credentials found in .env file")
+    
+    def get_credentials_ssh(self):
+        credentials = [] 
         for i in range(1, 4):
             username = os.getenv(f'SSH_USER_{i}')
             password = os.getenv(f'SSH_PASS_{i}')
@@ -53,26 +52,30 @@ class SSHCredentials:
                     'password': password,
                     'key_file': key_file
                 })
-        
-        if not self.credentials:
-            raise ValueError("No SSH credentials found in .env file")
-    
-    def get_credentials(self):
-        """Return the list of credentials.
 
-        Returns:
-            List[Dict]: The list of credential dictionaries.
-        """
         return self.credentials
 
-async def _try_ssh_connection(
-    host: str,
-    port: int,
-    credentials_list: List[Dict],
-    timeout: int    
-) -> Union[asyncssh.SSHClientConnection, Dict]:
-    """Attempt SSH connection iterating over provided credentials.
+    def get_credentials_http(self):
+        credentials: list = []
+        for i in range(1, 4):
+            self.token = os.getenv(f'HTTP_TOKEN_{i}')
+            self.username = os.getenv(f'HTTP_USERNAME_{i}')
+            self.password = os.getenv(f'HTTP_PASSWORD_{i}')
+            self.api_key = os.getenv(f'HTTP_API_KEY_{i}')
+            
+            if self.token or (self.username and self.password) or self.api_key:
+                credential.append({
+                    'token': self.token,
+                    'username': self.username,
+                    'password': self.password,
+                    'api_key': self.api_key
+                })
+        
+        return credentials
 
+
+async def _try_ssh_connection(host: str, port: int = PORT, credentials_list: List[Dict], timeout: int = TIMEOUT) -> object:
+    """Attempt SSH connection iterating over provided credentials.
     Tries each credential set until a connection succeeds or all fail.
 
     Args:
@@ -82,12 +85,9 @@ async def _try_ssh_connection(
         timeout (int): Connection timeout in seconds.
 
     Returns:
-        Tuple[asyncssh.SSHClientConnection, Dict]: Established connection and the
-        credential dict that succeeded.
-
-    Raises:
-        Exception: If all credential attempts fail (raises last encountered error).
+        Tuple[asyncssh.SSHClientConnection, Dict]: Established connection and the credential dict that succeeded.
     """
+
     last_error = None
     for creds in credentials_list:
         try:
@@ -104,39 +104,18 @@ async def _try_ssh_connection(
         except Exception as e:
             last_error = e
             continue
-    raise Exception(f"Last error: {str(last_error)}")
 
-async def ssh_exec_single(
-    host: str,
-    command: str,
-    port: int = 22,
-    timeout: int = 10
-) -> Dict[str, Union[str, dict]]:
-    """Execute a single SSH command with automatic credential discovery.
+    if last_error:
+        return f"Last error: {str(last_error)}"
 
-    The function will automatically load credentials from .env file and attempt
-    to connect using each credential set until one succeeds.
+    return None
 
-    Args:
-        host (str): Target host IP or hostname.
-        command (str): Command to execute on the remote host.
-        port (int, optional): SSH port. Defaults to 22.
-        timeout (int, optional): Command and connection timeout in seconds.
-            Defaults to 30.
-
-    Returns:
-        Dict[str, Union[str, dict]]: Dictionary with keys:
-            'output' (str): Command stdout or stderr.
-            'credentials_used' (dict): The credential info used (username and auth method).
-
-    Raises:
-        Exception: If SSH connection or execution fails.
-    """
-    credentials = SSHCredentials()
+async def ssh_single_command(host: str, command: str, port: int = PORT, timeout: int = TIMEOUT) -> str:
+    credentials = Credentials()
 
     try:
         conn, creds_used = await _try_ssh_connection(
-            host, port, credentials.get_credentials(), timeout
+            host, port, credentials.get_credentials_ssh(), timeout
         )
         
         async with conn:
@@ -153,40 +132,12 @@ async def ssh_exec_single(
     except Exception as e:
         raise Exception(f"SSH Error: {str(e)}")
 
-async def ssh_exec_multiple(
-    host: str,
-    commands: List[str],
-    port: int = 22,
-    timeout: int = 10,
-    return_type: str = 'dict'
-) -> Dict[str, Union[Dict, List, dict]]:
-    """Execute multiple SSH commands in the same session with automatic credential discovery.
-
-    Opens one SSH session, runs each command sequentially and collects outputs.
-    Credentials are automatically loaded from .env file.
-
-    Args:
-        host (str): Target host IP or hostname.
-        commands (List[str]): List of commands to execute.
-        port (int, optional): SSH port. Defaults to 22.
-        timeout (int, optional): Timeout per command in seconds. Defaults to 30.
-        return_type (str, optional): 'dict' to return {command: output} or 'list'
-            to return a list of outputs in order. Defaults to 'dict'.
-
-    Returns:
-        Dict[str, Union[Dict, List, dict]]: {
-            'outputs': dict or list with outputs,
-            'credentials_used': credential summary that worked
-        }
-
-    Raises:
-        Exception: If all connection attempts fail or command execution errors.
-    """
-    credentials = SSHCredentials()
+async def ssh_multiples_command(host: str, commands: List[str], port: int = PORT, timeout: int = TIMEOUT, return_type: str = 'dict') -> list:
+    credentials = Credentials()
     
     try:
         conn, creds_used = await _try_ssh_connection(
-            host, port, credentials.get_credentials(), timeout
+            host, port, credentials.get_credentials_ssh(), timeout
         )
         
         async with conn:
@@ -210,91 +161,12 @@ async def ssh_exec_multiple(
     except Exception as e:
         raise Exception(f"SSH Error: {str(e)}")
 
-# Synchronous wrapper functions
-def wrapper_async_ssh_single_command(
-    host: str,
-    command: str,
-    port: int = 22,
-    timeout: int = 10
-) -> Dict[str, Union[str, dict]]:
-    """Synchronous wrapper for ssh_exec_single.
+def ssh_single_wrap(host: str, command: str, port: int = PORT, timeout: int = TIMEOUT) -> str:
+    return asyncio.run(ssh_single_command(host, command, port, timeout))
 
-    Args:
-        host (str): Target host IP or hostname.
-        command (str): Command to execute.
-        port (int, optional): SSH port. Defaults to 22.
-        timeout (int, optional): Timeout in seconds. Defaults to 30.
+def ssh_multiples_wrap(host: str, commands: List[str], port: int = PORT, timeout: int = TIMEOUT, return_type: str = 'dict') -> str: 
+    return asyncio.run(ssh_multiples_command(host, commands, port, timeout, return_type))
 
-    Returns:
-        Dict[str, Union[str, dict]]: Result returned by ssh_exec_single.
-    """
-    return asyncio.run(ssh_exec_single(host, command, port, timeout))
-
-def wrapper_async_ssh_multiple_commands(
-    host: str,
-    commands: List[str],
-    port: int = 22,
-    timeout: int = 10,
-    return_type: str = 'dict'
-) -> Dict[str, Union[Dict, List, dict]]:
-    """Synchronous wrapper for ssh_exec_multiple.
-
-    Args:
-        host (str): Target host IP or hostname.
-        commands (List[str]): Commands to execute.
-        port (int, optional): SSH port. Defaults to 22.
-        timeout (int, optional): Timeout per command in seconds. Defaults to 30.
-        return_type (str, optional): 'dict' or 'list' for output format.
-
-    Returns:
-        Dict[str, Union[Dict, List, dict]]: Result returned by ssh_exec_multiple.
-    """
-    return asyncio.run(ssh_exec_multiple(host, commands, port, timeout, return_type))
-
-
-
-class HTTPCredentials:
-    """Manage HTTP credentials loaded from a .env file.
-
-    Attributes:
-        token (Optional[str]): Bearer token.
-        username (Optional[str]): Username for basic/digest auth.
-        password (Optional[str]): Password for basic/digest auth.
-        api_key (Optional[str]): API key for api_key auth.
-    """
-    
-    def __init__(self):
-        
-        self.credential = []
-        for i in range(1, 4):
-            self.token = os.getenv(f'HTTP_TOKEN_{i}')
-            self.username = os.getenv(f'HTTP_USERNAME_{i}')
-            self.password = os.getenv(f'HTTP_PASSWORD_{i}')
-            self.api_key = os.getenv(f'HTTP_API_KEY_{i}')
-            
-            if self.token or (self.username and self.password) or self.api_key:
-                self.credential.append({
-                    'token': self.token,
-                    'username': self.username,
-                    'password': self.password,
-                    'api_key': self.api_key
-                })
-        if not self.credential:
-            raise ValueError("No HTTP credentials found in .env file")
-
-    def get_credentials(self) -> Dict[str, Optional[str]]:
-        """Return the credentials as a dictionary.
-
-        Returns:
-            Dict[str, Optional[str]]: Dictionary with keys 'token', 'username',
-                'password', and 'api_key'.
-        """
-        return {
-            'token': self.token,
-            'username': self.username,
-            'password': self.password,
-            'api_key': self.api_key
-        }
 
 class RouterHTTPClient:
     """HTTP client helpers for router APIs supporting multiple auth methods.
@@ -376,7 +248,7 @@ class RouterHTTPClient:
         api_key: Optional[str] = None,
         api_key_header: str = "X-API-Key",
         verify_ssl: bool = False,
-        timeout: int = 10
+        timeout: int = TIMEOUT
     ) -> Dict[str, Any]:
         """Perform an HTTP request with selected auth and parameters.
 
@@ -408,14 +280,12 @@ class RouterHTTPClient:
         Raises:
             Exception: For timeout, connection or other request errors.
         """
-        # Prepare headers
+
         auth_headers = self._get_auth_headers(
             auth_type, token, username, password, api_key, api_key_header
         )
-        
         final_headers = {**auth_headers, **(headers or {})}
         
-        # Prepare Digest authentication if applicable
         auth = None
         if auth_type == 'digest' and username and password:
             auth = httpx.DigestAuth(username, password)
@@ -429,8 +299,7 @@ class RouterHTTPClient:
                 timeout=httpx_timeout,
                 follow_redirects=True
             ) as client:
-                # Use asyncio.wait_for to ensure the coroutine is cancelled
-                # if the timeout is reached at the asyncio level as well.
+
                 try:
                     response = await asyncio.wait_for(
                         client.request(
@@ -445,10 +314,8 @@ class RouterHTTPClient:
                         timeout=timeout
                     )
                 except asyncio.TimeoutError:
-                    # Cancel the underlying request task if still running
                     raise Exception(f"Timeout connecting to {url} (asyncio.wait_for)")
 
-                # Try to parse as JSON, otherwise return text
                 try:
                     response_data = response.json()
                 except ValueError:
@@ -482,7 +349,7 @@ async def _try_http_connection(
     auth_type: str = 'basic',
     verify_ssl: bool = False,
     headers: Optional[Dict[str, str]] = None,
-    timeout: int = 10
+    timeout: int = TIMEOUT
 ) -> Dict[str, Optional[str]]:
     """Try different credentials until finding working ones.
     
@@ -501,36 +368,19 @@ async def _try_http_connection(
             'api_key': str or None
         }
     """
-    credentials_list = []
-    
-    # Load up to 3 sets of credentials from environment variables
-    for i in range(1, 4):
-        cred = {}
-        
-        if auth_type in ['basic', 'digest']:
-            env_user = os.getenv(f'HTTP_USER_{i}')
-            env_pass = os.getenv(f'HTTP_PASS_{i}')
-            if env_user and env_pass:
-                cred['username'] = env_user
-                cred['password'] = env_pass
-
-        if cred:
-            credentials_list.append(cred)
+    credentials_list = Credentials().get_credentials_http()
 
     if not credentials_list:
         raise ValueError(f"No credentials found for auth_type: {auth_type}")    
+    
     last_error = None
-
-    # Test every set of credentials
     for idx, creds in enumerate(credentials_list):
         try:
-            # Create a per-request httpx timeout
             httpx_timeout = httpx.Timeout(timeout, connect=min(10.0, timeout))
             async with httpx.AsyncClient(verify=verify_ssl, timeout=httpx_timeout) as client:
                 auth = None
                 headers = {}
 
-                # Configure authentication according to type
                 if auth_type == 'basic' and 'username' in creds:
                     auth = httpx.BasicAuth(creds['username'], creds['password'])
 
@@ -552,7 +402,6 @@ async def _try_http_connection(
                     continue
 
                 if response.status_code < 400:
-                    # Return with all possible keys
                     return {
                         'username': creds.get('username'),
                         'password': creds.get('password'),
@@ -593,7 +442,7 @@ async def http_router_request(
     json: Optional[Dict[str, Any]] = None,
     api_key_header: str = "X-API-Key",
     verify_ssl: bool = False,
-    timeout: int = 10
+    timeout: int = TIMEOUT
 ) -> Dict[str, Any]:
     """Perform HTTP requests to routers with automatic credential discovery.
     
@@ -783,111 +632,3 @@ def wrapper_http_router_request_batch(
         List[Union[Dict[str, Any], Exception]]: List of results or exceptions.
     """
     return asyncio.run(http_router_request_batch(requests, return_exceptions))
-
-
-"""
-Manual and example for using these classes
-
-#### 1) Create a .env file in the same directory with:
-        Note: The script reads up to 3 sets of credentials and attempts to use them in order.
-        SSH_USER_1=admin
-        SSH_PASS_1=password123
-        SSH_USER_2=root
-        SSH_PASS_2=rootpass456
-        SSH_USER_3=operator
-        SSH_PASS_3=operpass789
-
-        # HTTP credentials
-        HTTP_USER_1=admin
-        HTTP_PASS_1=adminpass
-        HTTP_USER_2=user
-        HTTP_PASS_2=userpass
-        HTTP_USER_3=operator
-        HTTP_PASS_3=operpass789
-
-#### 2) Example of using SSH classes:
-
-        # Single command
-        result = wrapper_async_ssh_single_command(host='192.168.1.1', command='ls -l')
-        print(result)
-
-        # Multiple commands
-        commands = ['uname -a', 'df -h', 'uptime']
-        result = wrapper_async_ssh_multiple_commands(host='192.168.1.1', commands=commands)
-        print(result)
-
-
-#### 3) Example of using HTTP classes:
-
-        # Single request
-        url = 'http://192.168.1.1/api/v1/resource'
-        result = wrapper_http_router_request(url, method='GET', auth_type='basic')
-        print(result)
-        
-        # Batch requests (multiple routers concurrently)
-        requests = [
-            {'url': 'http://192.168.1.1/api/status'},
-            {'url': 'http://192.168.1.2/api/status'},
-            {'url': 'http://192.168.1.3/api/config', 'method': 'POST', 'json': {'setting': 'value'}}
-        ]
-        results = wrapper_http_router_request_batch(requests)
-        for i, result in enumerate(results):
-            if isinstance(result, Exception):
-                print(f"Request {i+1} failed: {result}")
-            else:
-                print(f"Request {i+1} status: {result['status_code']}")
-
-Note: You don't need to specify credentials. The script reads them from the local .env file.
-      Only 3 credential sets are allowed per authentication type.
-
-
-#### 4) Example of using HTTP batch with the requests defined in app.py:
-
-        from test import wrapper_http_router_request_batch
-        from pprint import pprint
-        request = [
-            # S600 -> This device is a special model that use BASIC-AUTH, btw is a chinese device
-            {
-                'url': 'https://100.65.52.9/protected/macTable.do',
-                'method': 'GET',
-                'verify_ssl': False,
-                'auth_type': 'basic',
-                'headers': {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3',
-                    'Accept-Encoding': 'gzip, deflate',
-                    'Accept': '*/*',
-                }      
-            },
-            # 610 -> This device is a special model that use DIGEST-AUTH
-            {
-                'url': 'http://100.69.47.9/!dhost.b',
-                'method': 'GET',
-                'verify_ssl': False,
-                'auth_type': 'digest',  <- using digest for auth
-                'headers': {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3',
-                    'Accept-Encoding': 'gzip, deflate',
-                    'Accept': '*/*',
-                }  
-            }
-        ]
-        result = wrapper_http_router_request_batch(requests=request, return_exceptions=True)
-        print(len(result), type(result))
-        for i in result:
-            pprint(i, width=150, compact=True, sort_dicts=True)
-            print('=== DONE \n\n')
-
-#### 5) Example output of the above code:
-    
-        2 <class 'list'>
-        {'credentials_used': {'auth_type': 'basic', 'username': 'admin'},
-        'data': '<html><head><title>MAC Address Table</title></head><body>...</body></html>',
-        'headers': {'Content-Length': '1234', 'Content-Type': 'text/html; charset=UTF-8', ...},
-        'status_code': 200,
-        'success': True,
-        'url': 'https://100.65.52.9/protected/macTable.do'
-        }
-        === DONE
-
-"""
-
